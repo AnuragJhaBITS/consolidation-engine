@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multi-Entity Consolidation Engine</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --surface: #fff;
+    --border: #e0e3e8;
+    --text: #1b1f27;
+    --muted: #636a76;
+    --accent: #1a56db;
+    --accent-light: #eef2ff;
+    --green: #15803d;
+    --green-bg: #f0fdf4;
+    --red: #b91c1c;
+    --red-bg: #fef2f2;
+    --amber: #b45309;
+    --amber-bg: #fffbeb;
+    --radius: 8px;
+    --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:var(--font); background:var(--bg); color:var(--text); padding:24px; max-width:1140px; margin:0 auto; line-height:1.5; }
+  h1 { font-size:22px; font-weight:600; }
+  .subtitle { color:var(--muted); font-size:14px; margin-bottom:24px; }
+  .controls { display:flex; gap:12px; margin-bottom:24px; align-items:center; flex-wrap:wrap; }
+  button { font-family:var(--font); font-size:14px; font-weight:500; padding:10px 20px; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); cursor:pointer; }
+  button:hover { background:var(--bg); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.primary:hover { background:#1747b3; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .status { font-size:13px; color:var(--muted); }
+
+  .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; margin-bottom:24px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:16px; }
+  .card .label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-bottom:2px; }
+  .card .val { font-size:24px; font-weight:600; }
+  .card .val.green { color:var(--green); }
+  .card .val.red { color:var(--red); }
+
+  .section { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:20px; overflow:hidden; }
+  .section h3 { font-size:14px; font-weight:600; padding:14px 16px; border-bottom:1px solid var(--border); background:var(--bg); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; padding:9px 14px; font-weight:600; font-size:12px; color:var(--muted); border-bottom:1px solid var(--border); background:var(--bg); position:sticky; top:0; }
+  td { padding:9px 14px; border-bottom:1px solid var(--border); }
+  tr:last-child td { border-bottom:none; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pos { color:var(--green); }
+  .neg { color:var(--text); }
+
+  .check { display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid var(--border); font-size:13px; }
+  .check:last-child { border-bottom:none; }
+  .check .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .check .dot.pass { background:var(--green); }
+  .check .dot.fail { background:var(--red); }
+
+  .badge { display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:100px; }
+  .badge.parent { background:var(--accent-light); color:var(--accent); }
+  .badge.sub { background:var(--bg); color:var(--muted); }
+  .badge.nci { background:var(--amber-bg); color:var(--amber); }
+
+  #dashboard { display:none; }
+  @media(max-width:600px) { body{padding:16px;} .cards{grid-template-columns:repeat(2,1fr);} }
+</style>
+</head>
+<body>
+
+<h1>Multi-Entity Consolidation Engine</h1>
+<p class="subtitle">FX translation · intercompany elimination · minority interest · validation</p>
+
+<div class="controls">
+  <button onclick="seed()">Seed data</button>
+  <button onclick="consolidate()" class="primary">Consolidate</button>
+  <span class="status" id="status"></span>
+</div>
+
+<!-- Subsidiaries table (always visible after seed) -->
+<div class="section" id="subs-section" style="display:none;">
+  <h3>Group structure</h3>
+  <div id="subs-table"></div>
+</div>
+
+<div id="dashboard">
+  <div class="cards" id="summary-cards"></div>
+
+  <div class="section" id="validations-section">
+    <h3>Validation checks</h3>
+    <div id="validations"></div>
+  </div>
+
+  <div class="section">
+    <h3>Consolidated balance sheet (INR)</h3>
+    <div id="bs-table" style="overflow-x:auto;"></div>
+  </div>
+
+  <div class="section">
+    <h3>Consolidated income statement (INR)</h3>
+    <div id="pnl-table" style="overflow-x:auto;"></div>
+  </div>
+
+  <div class="section">
+    <h3>Elimination journal entries</h3>
+    <div id="elim-table" style="overflow-x:auto;"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const status = m => { $("#status").textContent = m; };
+
+function inr(n) {
+  const abs = Math.abs(n).toLocaleString("en-IN", {minimumFractionDigits:0, maximumFractionDigits:0});
+  return n < 0 ? `(${abs})` : abs;
+}
+function cls(n) { return n < 0 ? "neg" : "pos"; }
+
+async function seed() {
+  status("Seeding…");
+  await fetch("/api/seed", {method:"POST"});
+  const res = await fetch("/api/subsidiaries");
+  const subs = await res.json();
+  let html = `<table><tr><th>Entity</th><th>Currency</th><th>Ownership</th><th class="num">Accounts</th><th class="num">Total debits</th><th class="num">Total credits</th></tr>`;
+  for (const s of subs) {
+    const badge = s.isParent ? '<span class="badge parent">Parent</span>' :
+                  s.ownershipPct < 100 ? `<span class="badge nci">${s.ownershipPct}%</span>` :
+                  '<span class="badge sub">100%</span>';
+    html += `<tr>
+      <td>${s.name} ${badge}</td>
+      <td>${s.currency}</td>
+      <td>${s.ownershipPct}%</td>
+      <td class="num">${s.accountCount}</td>
+      <td class="num">${inr(s.totalDebits)}</td>
+      <td class="num">${inr(s.totalCredits)}</td>
+    </tr>`;
+  }
+  html += `</table>`;
+  $("#subs-table").innerHTML = html;
+  $("#subs-section").style.display = "block";
+  status("Seeded. Click Consolidate to run.");
+}
+
+async function consolidate() {
+  status("Running consolidation…");
+  const res = await fetch("/api/consolidate", {method:"POST"});
+  const r = await res.json();
+  $("#dashboard").style.display = "block";
+
+  // summary cards
+  const s = r.summary;
+  $("#summary-cards").innerHTML = `
+    <div class="card"><div class="label">Subsidiaries</div><div class="val">${s.subsidiariesConsolidated}</div></div>
+    <div class="card"><div class="label">Total assets</div><div class="val">₹${inr(s.totalAssets)}</div></div>
+    <div class="card"><div class="label">Total revenue</div><div class="val">₹${inr(Math.abs(s.totalRevenue))}</div></div>
+    <div class="card"><div class="label">Net income</div><div class="val ${s.netIncome < 0 ? 'green' : 'red'}">₹${inr(Math.abs(s.netIncome))}</div></div>
+    <div class="card"><div class="label">CTA reserve</div><div class="val">₹${inr(s.currencyTranslationReserve)}</div></div>
+    <div class="card"><div class="label">NCI</div><div class="val">₹${inr(s.nonControllingInterest)}</div></div>
+  `;
+
+  // validations
+  let vhtml = "";
+  for (const v of r.validations) {
+    vhtml += `<div class="check"><span class="dot ${v.passed?'pass':'fail'}"></span><strong>${v.rule}</strong>&nbsp;— ${v.detail}</div>`;
+  }
+  $("#validations").innerHTML = vhtml;
+
+  // balance sheet
+  renderTable("#bs-table", r.balanceSheet);
+  // income statement
+  renderTable("#pnl-table", r.incomeStatement);
+
+  // eliminations
+  let ehtml = `<table><tr><th>Description</th><th>Debit acct</th><th>Credit acct</th><th class="num">Amount (₹)</th></tr>`;
+  for (const e of r.eliminations) {
+    ehtml += `<tr><td>${e.description}</td><td>${e.debitAccount}</td><td>${e.creditAccount}</td><td class="num">${inr(e.amount)}</td></tr>`;
+  }
+  ehtml += `</table>`;
+  $("#elim-table").innerHTML = ehtml;
+
+  status("Done.");
+}
+
+function renderTable(sel, lines) {
+  let html = `<table><tr><th>Code</th><th>Account</th><th>Type</th><th class="num">Pre-elimination</th><th class="num">Elimination adj</th><th class="num">Consolidated</th></tr>`;
+  for (const l of lines) {
+    html += `<tr>
+      <td>${l.accountCode}</td>
+      <td>${l.accountName}</td>
+      <td>${l.accountType}</td>
+      <td class="num">${inr(l.preElimination)}</td>
+      <td class="num ${l.eliminationAdj !== 0 ? 'pos' : ''}">${l.eliminationAdj !== 0 ? inr(l.eliminationAdj) : '—'}</td>
+      <td class="num" style="font-weight:600;">${inr(l.consolidated)}</td>
+    </tr>`;
+  }
+  html += `</table>`;
+  $(sel).innerHTML = html;
+}
+</script>
+</body>
+</html>
